@@ -1,0 +1,294 @@
+---
+title: "BLN_BUE-experiments"
+output: html_document
+date: "2025-09-01"
+---
+
+# Setup
+
+## Setup libraries
+
+```{r, message = FALSE, warning = FALSE}
+library(CytoScan)
+library(dplyr)
+library(flowCore)
+library(FlowSOM)
+```
+
+## Setup file locations
+
+```{r}
+outputFolder <- "output/"
+
+# Location of data from Liechti et al.
+ALLData <- "PATH"
+
+bueFiles <- list.files(path = ALLData, pattern = "^bue.*\\.fcs$", full.names = TRUE)
+blnFiles <- list.files(path = ALLData, pattern = "^bln.*\\.fcs$", full.names = TRUE)
+
+channels <- c("CD58", "CD10", "CD34", "CD19", "CD38", "CD20", "CD45")
+```
+
+# CytoScan example
+
+```{r}
+CS <- CytoScan()
+skipPreprocess <- function(ff){
+  return(ff)
+}
+CS$preprocessFunction <- skipPreprocess
+labels <- c()
+for (file in c(bueFiles, blnFiles)){
+  if (file %in% bueFiles){
+    labels <- c(labels, "Buenos Aires")
+  } else {
+    labels <- c(labels, "Berlin")
+  }
+}
+CS <- addTestlabels(CS, labels)
+CS <- addTestdata(CS, input=c(bueFiles, blnFiles))
+
+CS <- generateFeatures(CS, channels, featMethod="quantiles")
+CS <- generateFeatures(CS, channels, featMethod="EMD")
+
+features_quantiles <- CS$features$test$quantiles
+features_quantiles$Center <- labels
+write.csv(features_quantiles, paste0(outputFolder, "ALL_PCA_quantiles.csv"))
+
+features_EMD <- CS$features$test$EMD
+features_EMD$Center <- labels
+write.csv(features_EMD, paste0(outputFolder, "ALL_PCA_EMD.csv"))
+```
+
+# FlowSOM example
+
+```{r}
+set.seed(42)
+
+blnFiles.sub <- sample(blnFiles, 20)
+bueFiles.sub <- sample(bueFiles, 1)
+
+labels <- c()
+for (file in c(blnFiles.sub, bueFiles.sub)){
+  if (file %in% bueFiles.sub){
+    labels <- c(labels, "Buenos Aires")
+  } else {
+    labels <- c(labels, "Berlin")
+  }
+}
+
+pat <- "CD58$|CD10$|CD34$|CD19$|CD38$|CD20$|CD45"
+f.set <- read.flowSet(files = c(blnFiles.sub, bueFiles.sub),
+                      column.pattern = pat,
+                      transformation = F,
+                      min.limit = NULL, 
+                      truncate_max_range = FALSE)
+
+agg <- AggregateFlowFrames(f.set, cTotal = 1e6)
+fSOM <- FlowSOM(agg, colsToUse = channels, seed = 42)
+```
+
+```{r, echo=FALSE}
+library(RColorBrewer)
+tab10_colors <- brewer.pal(10, "Paired")  # Get the tab10 color palette
+
+# Ensure Arial font is available
+library(extrafont)
+font_import(pattern = "Arial") 
+loadfonts(device = "pdf")
+
+file_colors <- c("#4DBBD5FF", "#E64B35FF") 
+p1 <- PlotPies(fsom = fSOM, 
+               cellTypes = factor(labels[fSOM$data[,"File"]]),
+               colorPalette = file_colors,
+               maxNodeSize = 2,
+               nodeSizes = rep(2, 10*10))
+p1 <- p1 + theme(legend.position = "none")  
+ggsave("figures/Figure 3B (files).pdf", p1, width = 40, height = 50, dpi = 600, units = "mm")
+
+p2 <- PlotPies(fsom = fSOM, 
+               cellTypes = GetMetaclusters(fSOM),
+               maxNodeSize = 2,
+               colorPalette = tab10_colors,  # Apply the Okabe-Ito color palette
+               nodeSizes = rep(2, 10*10))
+p2 <- p2 + theme(legend.position = "none")
+ggsave("figures/Figure 3B (metaclusters).pdf", p2, width = 40, height = 50, dpi = 600, units = "mm")
+``` 
+
+# Simulation (one-by-one)
+
+```{r}
+# This is a helper is used to assess performance
+getPerformance <- function(CS, files, modifiedSample, featMethod, slot){
+  # Computing TP, TN, FP, FN
+  gt <- data.frame(file = files, gt = files == modifiedSample)
+  pred <- data.frame(pred = CS[[slot]][[featMethod]])
+  pred$file <- rownames(pred)
+  df <- merge(gt, pred)
+  df$gt <- as.logical(df$gt)
+  df$pred <- as.logical(df$pred)
+  TP <- sum(df$gt & df$pred)
+  TN <- sum(!df$gt & !df$pred)
+  FP <- sum(!df$gt & df$pred)
+  FN <- sum(df$gt & !df$pred)
+  output <- data.frame(modifiedSample = modifiedSample,
+                       featMethod = featMethod,
+                       TP = TP,
+                       TN = TN,
+                       FP = FP,
+                       FN = FN)
+  return(output)
+}
+```
+
+```{r}
+simulateDatasets <- function(dataset1, dataset2){
+  datasets <- list("dataset1" = dataset1,
+                   "dataset2" = dataset2)
+  results <- data.frame()
+  for (dataset in names(datasets)){
+    normalSamples <- datasets[[dataset]]
+    anomalySamples <- datasets[[names(datasets)[names(datasets) != dataset]]]
+    for (anomalyIndex in seq_along(anomalySamples)){
+      anomalySample <- anomalySamples[anomalyIndex]
+      cat(dataset, anomalyIndex)
+      CS <- CytoScan()
+      skipPreprocess <- function(ff){
+        return(ff)
+      }
+      CS$preprocessFunction <- skipPreprocess
+      CS <- addTestdata(CS, input = c(normalSamples, anomalySample))
+      CS <- addReferencedata(CS, input = normalSamples)
+      
+      for (featMethod in featMethods){
+        CS <- generateFeatures(CS, channels, featMethod = featMethod)
+        CS <- Flag(CS, flagMethod = "outlier", featMethod = featMethod)
+        output <- getPerformance(CS, c(normalSamples, anomalySample), 
+                                 anomalySample, featMethod, "outliers")
+        output$majorityDataset <- dataset
+        output$flagMethod <- "outlier"
+        results <- rbind(results, output)
+  
+        CS <- Flag(CS, flagMethod = "novelty", featMethod = featMethod)
+        output <- getPerformance(CS, c(normalSamples, anomalySample), 
+                                 anomalySample, featMethod, "novelties")
+        output$majorityDataset <- dataset
+        output$flagMethod <- "novelty"
+        results <- rbind(results, output)
+      }
+    }
+  }
+  return(results)
+}
+```
+
+Note: this step can take hours to run!
+
+```{r}
+filename <- paste0("output/datasetSimulation.csv")
+if (!file.exists(filename)){
+  results <- simulateDatasets(bueFiles, blnFiles)
+  write.csv(results, filename)
+}
+```
+
+# Increasing amounts
+
+```{r}
+# This is a helper is used to assess performance
+getPerformance <- function(CS, files, modifiedFiles, featMethod, slot){
+  # Computing TP, TN, FP, FN
+  gt <- data.frame(file = files)
+  gt$gt <- gt$file %in% modifiedFiles
+  pred <- data.frame(pred = CS[[slot]][[featMethod]])
+  pred$file <- rownames(pred)
+  df <- merge(gt, pred)
+  df$gt <- as.logical(df$gt)
+  df$pred <- as.logical(df$pred)
+  TP <- sum(df$gt & df$pred)
+  TN <- sum(!df$gt & !df$pred)
+  FP <- sum(!df$gt & df$pred)
+  FN <- sum(df$gt & !df$pred)
+  output <- data.frame(featMethod = featMethod,
+                       TP = TP,
+                       TN = TN,
+                       FP = FP,
+                       FN = FN)
+  return(output)
+}
+```
+
+```{r}
+simulateBatchdatasets <- function(dataset1, dataset2, max_fraction = 0.25, random_starts = 20){
+  datasets <- list("dataset1" = dataset1,
+                   "dataset2" = dataset2)
+  results <- data.frame()
+  
+  for (dataset in names(datasets)){
+    normalSamples <- datasets[[dataset]]
+    anomalySamples <- datasets[[names(datasets)[names(datasets) != dataset]]]
+    # Add a maximum of max_fraction anomalies
+    total_size <- round(max_fraction * length(anomalySamples))
+
+    for (seed in seq(1, random_starts)){
+      # Select a random subset of anomalies
+      set.seed(seed)
+      seedAnomalies <- sample(anomalySamples, total_size)
+      
+      for (size in seq(1, total_size)){
+        selectedAnomalies <- seedAnomalies[1:size]
+        cat(dataset, seed, size)
+
+        CS <- CytoScan()
+        skipPreprocess <- function(ff){
+          return(ff)
+        }
+        CS$preprocessFunction <- skipPreprocess
+        for (featMethod in featMethods){
+          # Evaluate outlier detection
+          CS <- addTestdata(CS, input = c(normalSamples, selectedAnomalies))
+          CS <- addReferencedata(CS, input = normalSamples)
+          CS <- generateFeatures(CS, channels, featMethod = featMethod)
+          CS <- Flag(CS, flagMethod = "outlier", featMethod = featMethod)
+          output <- getPerformance(CS, c(normalSamples, selectedAnomalies), 
+                                   selectedAnomalies, featMethod, "outliers")
+          output$majorityDataset <- dataset
+          output$seed <- seed
+          output$index <- size
+          output$flagMethod <- "outlier"
+          results <- rbind(results, output)
+          
+          # If novelty detection + EMD, recalculate features on reference only!
+          if (featMethod == "EMD"){
+            CS <- generateFeatures(CS, channels, featMethod = featMethod,
+                                   aggSlot = "reference", recalculate = TRUE)
+          }
+          CS <- Flag(CS, flagMethod = "novelty", featMethod = featMethod)
+          output <- getPerformance(CS, c(normalSamples, selectedAnomalies), 
+                                   selectedAnomalies, featMethod, "novelties")
+          output$majorityDataset <- dataset
+          output$seed <- seed
+          output$index <- size
+          output$flagMethod <- "novelty"
+          results <- rbind(results, output)
+        }
+      }
+    }
+  }
+  return(results)
+}
+```
+
+```{r}
+featMethods <- c("quantiles", "EMD")
+
+filename <- paste0("output/datasetBatchsimulation.csv")
+if (!file.exists(filename)){
+  results <- simulateBatchdatasets(bueFiles, blnFiles)
+  write.csv(results, filename)
+}
+```
+
+```{r sessionInfo, echo=FALSE}
+sessionInfo()
+```
