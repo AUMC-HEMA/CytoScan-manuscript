@@ -1,0 +1,196 @@
+---
+title: "HO132-experiments"
+output: html_document
+date: "2025-09-01"
+---
+
+# Setup
+
+## Setup libraries
+
+```{r, message = FALSE, warning = FALSE}
+library(CytoScan)
+library(dplyr)
+library(extrafont)
+library(ggplot2)
+font_import(pattern = "Arial") 
+```
+
+```{r}
+# Create a custom ggplot2 theme 
+custom_theme <- function() {
+  theme_minimal(base_size = 7) + 
+    theme(
+      panel.border = element_rect(color = "black", fill = NA, size = 0.75),
+      plot.background = element_rect(fill = "white", color = NA), 
+      panel.background = element_rect(fill = "white", color = NA),
+      panel.grid.major = element_blank(),   
+      panel.grid.minor = element_blank(),   
+      axis.ticks = element_line(linewidth = 0.5, color="black"), 
+      axis.ticks.length = unit(1.5, "mm"),
+      axis.text.x = element_text(margin = margin(t = 4)),
+      axis.text.y = element_text(margin = margin(r = 4)),
+      axis.text = element_text(size = 7, color="black"),    
+      axis.title = element_text(size = 7, color="black"),   
+      plot.title = element_text(size = 7, color="black"),    
+      plot.subtitle = element_text(size = 7, color="black"),  
+      plot.caption = element_text(size = 7, color="black"),   
+      text = element_text(family = "Arial",
+                          face = "plain",
+                          size = 7,
+                          color="black")
+    )
+}
+```
+
+# Runtime barchart
+
+```{r}
+category <- rep(c("HO132_scatter \n (n=10,888 files)", 
+                  "HO132_LSC \n (n=1,371 files)"), each = 2)  
+subcategory <- rep(c("Quantiles", "EMD"), times = 2)   
+values <- c(55, 75, 10, 5)                                    
+
+data <- data.frame(category, subcategory, values)
+
+# Set category order
+data$category <- factor(data$category, 
+                        levels = c("HO132_scatter \n (n=10,888 files)", 
+                                   "HO132_LSC \n (n=1,371 files)"))
+
+# Set subcategory order (Quantiles first)
+data$subcategory <- factor(data$subcategory, 
+                           levels = c("Quantiles", "EMD"))
+
+p <- ggplot(data, aes(x = category, y = values, fill = subcategory)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  scale_fill_manual(values = c("Quantiles" = "#E69F00",   # Orange
+                               "EMD" = "#56B4E9")) +     # Sky Blue
+  labs(
+    x = "",
+    y = "Runtime (minutes)",
+    fill = "Feature generation"
+  ) +
+  custom_theme() +
+    theme(
+    legend.key.size = unit(4, "mm"),
+    legend.text = element_text(size = 7),
+    legend.title = element_text(size = 8),
+    legend.position = "none"
+  )
+
+ggsave("figures/figure_4a.pdf", p, width = 50, height = 50, dpi = 1200, units = "mm")
+```
+
+# PCA
+
+```{r}
+CS <- readRDS("CytoScan_HOVON-SAKK-132-markers.rds")
+metadata <- read.csv("CYTOSCAN_FILES.csv")
+metadata <- metadata[metadata$tube == "P5",]
+```
+
+```{r}
+CS <- addTestlabels(CS, metadata$cytometer_id)
+
+p <- plotPCA(CS, "quantiles", "test", "test", color = "labels", plotArrows = TRUE,
+             nLoadings = 50)
+
+p <- p + 
+  scale_color_manual(values = c("V33896201675" = "#1f77b4", 
+                                "V96100499" = "#ff7f0e",
+                                "V96300047" = "#2ca02c")) +
+  custom_theme() +
+  theme(
+    legend.key.size = unit(4, "mm"),
+    legend.text = element_text(size = 7),
+    legend.title = element_text(size = 8),
+    legend.position = "none"
+  )
+
+ggsave("figures/figure_4b.pdf", p, width = 45, height = 50, dpi = 1200, units = "mm")
+```
+
+```{r}
+CS <- addTestlabels(CS, metadata$timepointMRDmeasurement)
+
+p <- plotPCA(CS, "quantiles", "test", "test", color = "labels")
+
+p <- p + 
+  # scale_color_manual(values = c("V33896201675" = "#1f77b4", 
+  #                               "V96100499" = "#ff7f0e",
+  #                               "V96300047" = "#2ca02c")) +
+  custom_theme() +
+  ggsci::scale_color_npg() +
+  theme(
+    legend.key.size = unit(4, "mm"),
+    legend.text = element_text(size = 7),
+    legend.title = element_text(size = 8),
+    legend.position = "none"
+  )
+
+ggsave("figures/figure_4c.pdf", p, width = 45, height = 50, dpi = 1200, 
+        units = "mm")
+```
+
+```{r}
+CS <- Flag(CS, "quantiles", "outliers")
+
+p <- plotPCA(CS, "quantiles", "test", "test", color = "outlier")
+
+p <- p + 
+  scale_color_manual(values = c("TRUE" = "#E64B35FF",
+                               "FALSE" = "grey")) +
+  custom_theme() +
+  theme(
+    legend.key.size = unit(4, "mm"),
+    legend.text = element_text(size = 7),
+    legend.title = element_text(size = 8),
+    legend.position = "none"
+  )
+
+ggsave("figures/figure_4d.pdf", p, width = 45, height = 50, dpi = 1200, 
+        units = "mm")
+```
+
+# Heatmap
+
+```{r}
+markers <- c("CD45RA", "COMBI", "CD123", "CD33", "CD38", "CD44", "CD34", "CD45")
+p <- plotHeatmap(CS, "quantiles", "test", markers)
+
+meta <- data.frame("Cytometer" = metadata$cytometer_id, 
+                   "Timepoint" = metadata$timepointMRDmeasurement,
+                   "Outlier" = CS$outliers$quantiles)
+
+map_list <- c("V33896201675" = "FACS CANTO II #1",
+              "V96100499" = "FACS CANTO II #2",
+              "V96300047" = "FACS CANTO II #3")
+
+meta[, "Cytometer"] <- map_list[meta[,"Cytometer"]]
+
+PC1 <- prcomp(CS$features$test$quantiles)$x[,1]
+
+col_list <- list(Cytometer = c("FACS CANTO II #1" = "#1f77b4", 
+                               "FACS CANTO II #2" = "#ff7f0e",
+                               "FACS CANTO II #3" = "#2ca02c"),
+                 Timepoint = c("DIAGNOSIS" = "#E64B35FF",
+                               "POSTCYCLE1" = "#00A087FF",
+                               "POSTCYCLE2" = "#3C5488FF",
+                               "POSTCONS" = "#4DBBD5FF",
+                               "RELAPSE" = "#8491B4FF",
+                               "POSTRELAPSE" = "#F39B7FFF"),
+                 Outlier = c("TRUE" = "#E64B35FF", "FALSE" = "grey"),
+                 PC1   = circlize::colorRamp2(c(min(PC1), max(PC1)), c("white", "darkblue")))
+
+meta <- cbind(meta, PC1)
+
+# Create the row annotation
+ha <- rowAnnotation(df = meta, col = col_list)
+
+p <- p + ha
+
+png("figures/Figure 4E.png",width=250, height=300, units="mm",res=1200)
+plot(p)
+dev.off()
+```
