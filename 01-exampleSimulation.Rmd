@@ -1,0 +1,166 @@
+---
+title: "CytoScan example"
+output: html_document
+date: "2025-09-01"
+---
+
+```{r}
+library(extrafont)
+library(ggplot2)
+library(CytoScan)
+library(ComplexHeatmap)
+```
+
+```{r}
+liechtiData <- "<PATH>"
+```
+
+```{r}
+# Get all the files from Liechti_28 with high T-cell viability
+metaFile <- paste0(liechtiData, "210808_Viability summary_updated.xlsx")
+labels <- data.frame(readxl::read_excel(metaFile, sheet="ICS"), 
+                     check.names = FALSE)
+labels <- labels[labels[,"FlowJo ID"] != "2745",]
+labels <- labels[labels[,"Viable of CD3"] > 25,]
+ids <- labels[,"FlowJo ID"]
+files <- unlist(lapply(ids, function(x) paste0(liechtiData, x, ".fcs")))
+# Select the subset of files send by Sofie van Gassen
+availableFiles <- list.files(substr(liechtiData, 0, nchar(liechtiData)-1), 
+                             pattern = "fcs", full.names = TRUE)
+files <- files[files %in% availableFiles]
+# Get a random subset of 100 files from this subset
+set.seed(42)
+all_files <- sample(files, 100)
+```
+
+```{r}
+# Increase PD-1
+ff <- flowCore::read.FCS(files[1])
+ff@exprs[,"U660-A"] <- ff@exprs[,"U660-A"] + 2 * IQR(ff@exprs[,"U660-A"])
+flowCore::write.FCS(ff, "simulated_anomaly_1.fcs")
+
+ff <- flowCore::read.FCS(files[2])
+ff@exprs[,"U660-A"] <- ff@exprs[,"U660-A"] + 2 * IQR(ff@exprs[,"U660-A"])
+flowCore::write.FCS(ff, "simulated_anomaly_2.fcs")
+
+ff <- flowCore::read.FCS(files[3])
+ff@exprs[,"U660-A"] <- ff@exprs[,"U660-A"] + 2 * IQR(ff@exprs[,"U660-A"])
+flowCore::write.FCS(ff, "simulated_anomaly_3.fcs")
+```
+
+```{r}
+CS <- CytoScan()
+CS <- addTestdata(CS, input = c(all_files[4:100], 
+                                "simulated_anomaly_1.fcs",
+                                "simulated_anomaly_2.fcs",
+                                "simulated_anomaly_3.fcs"))
+
+# CD3, CD4, CD8, CD38, CD45RA, CCR7, PD-1, HLA-DR, CD27
+channels <- c("V510-A", "U785-A", "V570-A", "V750-A", "R730-A", "U390-A", 
+              "U660-A", "G710-A", "V785-A")
+
+ProcessInput <- function(ff){
+  return(ff)
+}
+CS$preprocessFunction <- ProcessInput
+CS <- generateFeatures(CS, channels, "quantiles")
+CS <- Flag(CS, "quantiles", "outlier")
+CS <- addTestlabels(CS, c(rep("Normal", 97), rep("Ground truth anomaly", 3)))
+```
+
+```{r}
+# Load the Arial font
+font_import(pattern = "Arial") 
+
+# Create a custom ggplot2 theme 
+custom_theme <- function() {
+  theme_minimal(base_size = 7) + 
+    theme(
+      panel.border = element_rect(color = "black", fill = NA, size = 0.75),
+      plot.background = element_rect(fill = "white", color = NA), 
+      panel.background = element_rect(fill = "white", color = NA),
+      panel.grid.major = element_blank(),   
+      panel.grid.minor = element_blank(),   
+      axis.ticks = element_line(linewidth = 0.5, color="black"), 
+      axis.ticks.length = unit(1.5, "mm"),
+      axis.text.x = element_text(margin = margin(t = 4)),
+      axis.text.y = element_text(margin = margin(r = 4)),
+      
+      axis.text = element_text(size = 7, color="black"),    
+      axis.title = element_text(size = 7, color="black"),   
+      plot.title = element_text(size = 7, color="black"),    
+      plot.subtitle = element_text(size = 7, color="black"),  
+      plot.caption = element_text(size = 7, color="black"),   
+      text = element_text(family = "Arial",
+                          face = "plain",
+                          size = 7,
+                          color="black")
+    )
+}
+```
+
+# Plot PCA
+
+```{r}
+pca_plot <- plotPCA(CS, "quantiles", "test", "test", shape = "outlier", 
+                    color = "labels")
+pca_plot <- pca_plot + 
+  scale_color_manual(values = c("Ground truth anomaly" = "#E64B35FF", 
+                                "Normal" = "grey")) +
+  custom_theme() +
+  theme(
+    legend.key.size = unit(4, "mm"),
+    legend.text = element_text(size = 7),
+    legend.title = element_text(size = 8),
+    legend.position = "none"
+  )
+ggsave("figures/figure_1b.pdf", pca_plot, width = 40, height = 60, 
+       dpi = 1200, units = "mm")
+```
+
+# Plot heatmap
+
+```{r}
+png("figures/figure_1c.pdf",width=2.7, height=2.7, units="in",res=1200)
+plotHeatmap(CS, "quantiles", "test")
+dev.off()
+```
+
+# Plot boxplot
+
+```{r}
+CS <- CytoScan()
+CS <- addTestdata(CS, input = c(all_files[4:50], 
+                                "simulated_anomaly_1.fcs",
+                                "simulated_anomaly_2.fcs",
+                                "simulated_anomaly_3.fcs"))
+
+# CD3, CD4, CD8, CD38, CD45RA, CCR7, PD-1, HLA-DR, CD27
+channels <- c("V510-A", "U785-A", "V570-A", "V750-A", "R730-A", "U390-A", 
+              "U660-A", "G710-A", "V785-A")
+ProcessInput <- function(ff){
+  return(ff)
+}
+CS$preprocessFunction <- ProcessInput
+CS <- generateFeatures(CS, channels, "quantiles")
+CS <- addTestlabels(CS, c(rep("Normal", 47), rep("Ground truth anomaly", 3)))
+
+p1 <- plotBoxplot(CS, "test", "U660-A", n=1000, color="labels", 
+                  featMethod = "quantiles")
+
+p2 <- p1 + 
+  scale_fill_manual(values = c("Ground truth anomaly" = "#E64B35FF", 
+                               "Normal" = "grey")) +
+  custom_theme() +
+  coord_flip() +
+  ggplot2::labs(title = paste("PD-1 expression"), x="Files") +
+  theme(
+    legend.key.size = unit(4, "mm"),
+    legend.text = element_text(size = 7),
+    legend.title = element_text(size = 8),
+    legend.position = "none",
+    axis.text.y = element_blank()
+  )
+ggsave("figures/figure_1d.pdf", p2, width = 50, height = 80, dpi = 1200, 
+       units = "mm")
+```
