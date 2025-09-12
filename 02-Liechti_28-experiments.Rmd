@@ -1,0 +1,668 @@
+---
+title: "Liechti_28-experiments"
+output: html_document
+date: "2025-09-01"
+---
+
+# Setup
+
+## Setup libraries
+
+```{r, message = FALSE, warning = FALSE}
+library(CytoScan)
+library(dplyr)
+library(FlowSOM)
+library(flowCore)
+library(flowDensity)
+```
+
+## Setup file locations
+
+```{r}
+outputFolder <- "output/"
+
+# Location of data from Liechti et al.
+liechtiData <- "PATH"
+```
+
+# Experiments using data from Liechti et al. 
+
+## Organize data 
+
+### Define channels and lasers
+
+```{r}
+# All channels
+channels <- c("B515-A", "B610-A", "B660-A", "B710-A", "B780-A", "V450-A",
+              "V510-A", "V570-A", "V605-A", "V655-A", "V710-A", "V750-A",
+              "V785-A", "U390-A", "U450-A", "U500-A", "U570-A", "U660-A", 
+              "U740-A", "U785-A", "R670-A", "R730-A", "R780-A", "G575-A",
+              "G610-A", "G660-A", "G710-A", "G780-A")
+# Define the channels by laser
+lasers <- list("blue" = c("B515-A", "B610-A", "B660-A", "B710-A", "B780-A"),
+               "violet" = c("V450-A", "V510-A", "V570-A", "V605-A",
+                            "V655-A", "V710-A", "V750-A", "V785-A"),
+               "ultraviolet" = c("U390-A", "U450-A", "U500-A", "U570-A", "U660-A",
+                                 "U740-A", "U785-A"),
+               "red" = c("R670-A", "R730-A", "R780-A"),
+               "green" = c("G575-A", "G610-A", "G660-A", "G710-A", "G780-A"))
+
+# All channels with bimodal expression patterns (selected later in this script)
+bimodals <- c("B780-A", "V510-A", "V570-A", "V655-A", "V785-A", "U390-A",
+              "U500-A", "U570-A", "U785-A", "R730-A", "R780-A", "G660-A",
+              "G710-A", "G780-A")
+# Define the bimodals by laser
+lasersBimodals <- list("blue" = c("B780-A"),
+                       "violet" = c("V510-A", "V570-A", "V655-A", "V785-A"),
+                       "ultraviolet" = c("U390-A", "U500-A", "U570-A", "U785-A"),
+                       "red" = c("R730-A", "R780-A"),
+                       "green" = c("G660-A", "G710-A", "G780-A"))
+```
+
+### Select FCS files
+
+```{r}
+# Get all the files from Liechti et al. with high T-cell viability
+metaFile <- paste0(liechtiData, "210808_Viability summary_updated.xlsx")
+labels <- data.frame(readxl::read_excel(metaFile, sheet="ICS"), 
+                     check.names = FALSE)
+labels <- labels[labels[,"FlowJo ID"] != "2745",]
+labels <- labels[labels[,"Viable of CD3"] > 25,]
+ids <- labels[,"FlowJo ID"]
+files <- unlist(lapply(ids, function(x) paste0(liechtiData, x, ".fcs")))
+# Select the subset of files send by Sofie van Gassen
+availableFiles <- list.files(substr(liechtiData, 0, nchar(liechtiData)-1), 
+                             pattern = "fcs", full.names = TRUE)
+files <- files[files %in% availableFiles]
+# Get a random subset of 100 files from this subset
+set.seed(42)
+files <- sample(files, 100)
+anomalySamples <- files
+```
+
+# Determine bimodality
+
+```{r}
+agg <- AggregateFlowFrames(files, cTotal = 100000)
+exprs <- data.frame(agg@exprs, check.names = FALSE)
+exprs[,"File"] <- as.character(exprs[,"File"])
+
+for (channel in channels){
+  print(channel)
+  dfs <- data.frame()
+  for (file in unique(exprs[,"File"])){
+    subset <- exprs[exprs[,"File"]==file, channel]
+    kde <- density(subset)
+    df <- data.frame(file = file, x = kde$x, y = kde$y)
+    dfs <- rbind(dfs, df)
+  }
+  p <- ggplot(dfs, aes(x = x, y = y, group = file)) +
+    geom_line(alpha = 0.3) +
+    labs(x = "Marker expression", title = channel)
+  
+  for (file in files){
+    ff <- read.FCS(file, which.lines = 1000)
+    cutoff <- deGate(ff, channel)
+    p <- p + geom_vline(xintercept = cutoff, color = "red", alpha = 0.3)
+  }
+  print(p)
+}
+```
+
+## Subsampling experiment
+
+In this experiment, we evaluate how many cells are required for different feature
+generation techniques.
+
+```{r}
+# Define the input cell counts and different settings for quantiles
+cellCounts <- c(2000, 1000, 500, 200, 100)
+quantileDistances <- c(0.01, 0.05, 0.1, 0.25)
+```
+
+```{r}
+simulateDownsampling <- function(cellCounts, quantileDistances){
+  CS <- CytoScan()
+  ProcessInput <- function(ff){
+    return(ff)
+  }
+  CS$preprocessFunction <- ProcessInput
+  CS <- addTestdata(CS, files)
+  
+  data <- data.frame()
+  for (featMethod in c("quantiles", "EMD")){
+    print(featMethod)
+    counts <- cellCounts
+    correlations <- list()
+    for (n in counts){
+      print(n)
+      if (featMethod == "quantiles"){
+        for (quantileDist in c(quantileDistances)){
+          print(quantileDist)
+          CS <- generateFeatures(CS, channels = channels, featMethod = featMethod,
+                                  cores = 10, n = NULL, quantileDist = quantileDist,
+                                 recalculate = TRUE)
+          features <- CS$features$test[[featMethod]]
+  
+          CS <- generateFeatures(CS, channels = channels, featMethod = featMethod,
+                          cores = 10, n = n, quantileDist = quantileDist, 
+                          recalculate = TRUE)
+          sampled_features <- CS$features$test[[featMethod]]
+          for (feature in colnames(features)){
+            data <- rbind(data, data.frame(featMethod = featMethod, n = n, 
+                                           quantileDist = quantileDist, 
+                                           feature = feature,
+                                           r = cor(features[,feature], 
+                                                   sampled_features[,feature])))
+          }
+        }
+      } else {
+          CS <- generateFeatures(CS, channels = channels, featMethod = featMethod,
+                                 cores = 10, n = NULL, recalculate = TRUE)
+          features <- CS$features$test[[featMethod]]
+          CS <- generateFeatures(CS, channels = channels, featMethod = featMethod,
+                                 cores = 10,  n = n, recalculate = TRUE)
+          sampled_features <- CS$features$test[[featMethod]]
+          for (feature in colnames(features)){
+            data <- rbind(data, data.frame(featMethod = featMethod, n = n, 
+                                           quantileDist = NA,
+                                           feature = feature,
+                                           r = cor(features[,feature], 
+                                                   sampled_features[,feature])))
+        }
+      }
+    }
+  }
+  return(data)
+}
+```
+
+```{r}
+if (!file.exists("output/downsampling_simulation.csv")){
+  results <- simulateDownsampling(cellCounts, quantileDistances)
+  write.csv(results, "output/downsampling_simulation.csv")
+}
+```
+
+## Laser simulation
+
+### Define the different simulations
+
+We use the custom pre-processing functionality of CytoScan to introduce effects.
+In this setting, the effects are introduced upon reading the FCS file.
+
+```{r}
+shiftFactors <- seq(0, 1.5, 0.05)
+stretchFactors <- seq(1, 2, 0.05)
+separateFactors <- seq(0, 1, 0.05)
+
+shiftInput <- function(ff){
+  if (grepl(anomalySample, ff@description$FILENAME)){
+    for (channel in effectChannels){
+      iqr <- IQR(ff@exprs[, channel])
+      ff@exprs[, channel] <- ff@exprs[, channel] + iqr * effectSize
+    }
+  }
+  return(ff)
+}
+
+stretchInput <- function(ff){
+  if (grepl(anomalySample, ff@description$FILENAME)){
+    for (channel in effectChannels){
+      iqr <- IQR(ff@exprs[, channel])
+      ff@exprs[, channel] <- ff@exprs[, channel] * effectSize
+    }
+  }
+  return(ff)
+}
+
+separateInput <- function(ff){
+  if (grepl(anomalySample, ff@description$FILENAME)){
+    for (channel in effectChannels){
+      iqr <- IQR(ff@exprs[, channel])
+      size <- effectSize * iqr
+      cutoff <- flowDensity::deGate(ff, channel)
+      ff@exprs[ff@exprs[,channel] < cutoff, channel] <- ff@exprs[ff@exprs[,channel] < cutoff, channel] - size
+      ff@exprs[ff@exprs[,channel] >= cutoff, channel] <- ff@exprs[ff@exprs[,channel] >= cutoff, channel] + size
+    }
+  }
+  return(ff)
+}
+```
+
+### Define functions for laser simulations
+
+```{r}
+# This is a helper is used to assess performance
+getPerformance <- function(CS, files, modifiedSample, featMethod, slot){
+  # Computing TP, TN, FP, FN
+  gt <- data.frame(file = files, gt = files == modifiedSample)
+  pred <- data.frame(pred = CS[[slot]][[featMethod]])
+  pred$file <- rownames(pred)
+  df <- merge(gt, pred)
+  df$gt <- as.logical(df$gt)
+  df$pred <- as.logical(df$pred)
+  TP <- sum(df$gt & df$pred)
+  TN <- sum(!df$gt & !df$pred)
+  FP <- sum(!df$gt & df$pred)
+  FN <- sum(df$gt & !df$pred)
+  output <- data.frame(modifiedSample = modifiedSample,
+                       featMethod = featMethod,
+                       TP = TP,
+                       TN = TN,
+                       FP = FP,
+                       FN = FN)
+  return(output)
+}
+```
+
+```{r}
+simulateLasers <- function(anomalySamples, simulatedSetting, featMethods,
+                           lasers){
+  ##############################################################################
+  # Generate baseline features
+  CS <- CytoScan()
+  # Add these variables so we can access them in parallel sockets
+  anomalySample <<- "None"
+  effectSize <<- NULL
+  effectChannels <<- NULL
+  CS$parallel$parallelVars <- c("CS", "channels", "readInput",
+                                "anomalySample", "effectSize", "effectChannels")
+  if (simulatedSetting == "shift"){
+    CS$preprocessFunction <- shiftInput
+    effectSizes <- shiftFactors
+  } else if (simulatedSetting == "stretch"){
+    CS$preprocessFunction <- stretchInput
+    effectSizes <- stretchFactors
+  } else if (simulatedSetting == "separate"){
+    CS$preprocessFunction <- separateInput
+    effectSizes <- separateFactors
+  } else if (simulatedSetting == "subsample"){
+    CS$preprocessFunction <- subsampleInput
+    effectSizes <- subsampleFactors
+  }
+  CS <- addTestdata(CS, files, read = TRUE)
+  CS$paths$reference <- CS$paths$test
+  CS$data$reference <- CS$data$test
+  # Generate all the features 
+  for (featMethod in featMethods){
+    CS <- generateFeatures(CS, channels = channels, featMethod = featMethod,
+                           cores = 20)
+  }
+  # Store normal data
+  BaselineCS <- CS
+  ##############################################################################
+  
+  results <- data.frame()
+  for (anomalyIndex in seq_along(anomalySamples)){
+    print(anomalyIndex)
+    start <- Sys.time()
+    anomalySample <<- anomalySamples[anomalyIndex]
+    # Add the test sample using an effect size and generate features
+    for (laser in names(lasers)){
+      effectChannels <<- lasers[[laser]]
+      for (effectSize in effectSizes){
+        effectSize <<- effectSize
+  
+        # Gate the baseline data
+        CS <- BaselineCS
+        testFeatures <- CS$features$test
+        refFeatures <- CS$features$reference
+        # Remove the data from the baseline CytoScan object
+        CS$paths$test <- files[files != anomalySample]
+        CS$paths$reference <- files[files != anomalySample]
+        for (featMethod in featMethods){
+          CS$features$test[[featMethod]] <- testFeatures[[featMethod]][rownames(testFeatures[[featMethod]]) != anomalySample,]
+          CS$features$reference[[featMethod]] <- refFeatures[[featMethod]][rownames(refFeatures[[featMethod]]) != anomalySample,]
+        }
+        
+        # Read the anomalous sample with the effects
+        CS <- addTestdata(CS, files, read = TRUE)
+        
+        # Generate the output
+        for (featMethod in featMethods){
+            CS <- generateFeatures(CS, channels = channels, featMethod = featMethod,
+                                   aggSlot = "test", cores = 1)
+            CS <- Flag(CS, flagMethod = "outlier", featMethod = featMethod)
+            output <- getPerformance(CS, files, anomalySample, featMethod, "outliers")
+            output$simulatedSetting <- simulatedSetting
+            output$laser <- laser
+            output$effectSize <- effectSize
+            output$flagMethod <- "outlier"
+            results <- rbind(results, output)
+            
+            CS <- Flag(CS, flagMethod = "novelty", featMethod = featMethod)
+            output <- getPerformance(CS, files, anomalySample, featMethod, "novelties")
+            output$simulatedSetting <- simulatedSetting
+            output$laser <- laser
+            output$effectSize <- effectSize
+            output$flagMethod <- "novelty"
+            results <- rbind(results, output)
+            features <- CS$features$test[[featMethod]]
+            CS$features$test[[featMethod]] <- features[rownames(features) != anomalySample,]
+        }
+      }
+    }
+    end <- Sys.time()
+    print(end - start)
+  }
+  return(results)
+}
+```
+
+### Run simulations
+
+Note: this step can take hours to run!
+
+```{r}
+featMethods <- c("EMD", "quantiles")
+
+for (effect in c("shift", "stretch", "separate")){
+  print(effect)
+  filename <- paste0("output/laserSimulation_", effect, ".csv")
+  if (!file.exists(filename)){
+    results <- simulateLasers(anomalySamples, effect, featMethods, lasers)
+    write.csv(results, filename)
+  }
+}
+```
+
+## Biological simulation
+
+### Define the different simulations
+
+```{r}
+subsampleFactors <- seq(0.1, 1, 0.1)
+```
+
+```{r}
+subsampleInput <- function(ff){
+  if (grepl(anomalySample, ff@description$FILENAME)){
+    # Get the metaclusters
+    ff_fSOM <- FlowSOM::NewData(fsom=fSOM, input=ff)
+    MC <- FlowSOM::GetMetaclusters(ff_fSOM)
+    # Perform subsampling
+    otherCells <- ff@exprs[MC != metaclusterID,]
+    MCCells <- ff@exprs[MC == metaclusterID,]
+    nCells <- ceiling((1 - effectSize) * nrow(MCCells))
+    idx <- sample(seq(1, nrow(MCCells)), nCells)
+    MCCells <- MCCells[idx,]
+    ff@exprs <- rbind(otherCells, MCCells)
+  }
+  return(ff)
+}
+```
+
+```{r}
+simulateSubsample <- function(anomalySamples, featMethods){
+  # Identify biggest cell population (FlowSOM)
+  set.seed(42)
+  agg <- FlowSOM::AggregateFlowFrames(files, cTotal=10**6, channels = channels, 
+                                      silent=TRUE)
+  fSOM <<- FlowSOM::FlowSOM(agg, colsToUse = channels, maxMeta = 20, seed = 42)
+  counts <- FlowSOM::GetCounts(fSOM, level = "metaclusters")
+  names(counts) <- seq(1, length(counts))
+  metaclusterID <<- as.numeric(names(counts)[which.max(counts)])
+
+  results <- data.frame()
+  # Loop over all of the anomalous samples
+  for (anomalyIndex in seq_along(anomalySamples)){
+    print(anomalyIndex)
+    start <- Sys.time()
+    anomalySample <<- anomalySamples[anomalyIndex]
+
+    CS <- CytoScan()
+    # Add these variables so we can access them in parallel sockets
+    effectSize <<- NULL
+    CS$parallel$parallelVars <- c("CS", "channels", "readInput",
+                                  "anomalySample", "effectSize", "fSOM",
+                                  "metaclusterID")
+    CS$parallel$parallelPackages <- c(CS$parallel$parallelPackages, "FlowSOM")
+    CS$preprocessFunction <- subsampleInput
+    effectSizes <- subsampleFactors
+    
+    CS <- addTestdata(CS, files[files != anomalySample], read = TRUE)
+    # Copy the test data to the reference data slot (faster than regeneration)
+    CS$paths$reference <- CS$paths$test
+    CS$data$reference <- CS$data$test
+
+    # Generate all the features 
+    for (featMethod in featMethods){
+      CS <- generateFeatures(CS, channels = channels, featMethod = featMethod,
+                             cores = 20)
+    }
+    # Add the test sample using an effect size and generate features
+    for (effectSize in effectSizes){
+      effectSize <<- effectSize
+      CS <- addTestdata(CS, files, read = TRUE)
+        for (featMethod in featMethods){
+          CS <- generateFeatures(CS, channels = channels, featMethod = featMethod,
+                                 aggSlot = "test", cores = 1)
+          CS <- Flag(CS, flagMethod = "outlier", featMethod = featMethod)
+          output <- getPerformance(CS, files, anomalySample, featMethod, "outliers")
+          output$simulatedSetting <- "subsample"
+          output$effectSize <- effectSize
+          output$flagMethod <- "outlier"
+          results <- rbind(results, output)
+          
+          CS <- Flag(CS, flagMethod = "novelty", featMethod = featMethod)
+          output <- getPerformance(CS, files, anomalySample, featMethod, "novelties")
+          output$simulatedSetting <- "subsample"
+          output$effectSize <- effectSize
+          output$flagMethod <- "novelty"
+          results <- rbind(results, output)
+          
+          features <- CS$features$test[[featMethod]]
+          CS$features$test[[featMethod]] <- features[rownames(features) != anomalySample,]
+        }
+        CS$data$test[[anomalySample]] <- NULL 
+        CS$paths$test <- files[files != anomalySample]
+    }
+    end <- Sys.time()
+    print(end - start)
+  }
+  return(results)
+}
+```
+
+```{r}
+filename <- paste0("output/subsampling_simulation.csv")
+if (!file.exists(filename)){
+  results <- simulateSubsample(anomalySamples, featMethods)
+  write.csv(results, filename)
+}
+```
+
+## Baseline FPR
+
+### Outlier detection
+
+```{r}
+CS <- CytoScan()
+ProcessInput <- function(ff){
+  return(ff)
+}
+CS$preprocessFunction <- ProcessInput
+CS <- addTestdata(CS, files)
+CS <- generateFeatures(CS, channels, "quantiles")
+CS <- generateFeatures(CS, channels, "EMD")
+CS <- Flag(CS, featMethod = "quantiles", "outlier")
+CS <- Flag(CS, featMethod = "EMD", "outlier")
+table(CS$outliers$quantiles)
+table(CS$outliers$EMD)
+```
+
+### Novelty detection
+
+```{r}
+results = list()
+for (file in files){
+  print(file)
+  ref_files <- files[files != file]
+  
+  CS <- CytoScan()
+  ProcessInput <- function(ff){
+    return(ff)
+  }
+  CS$preprocessFunction <- ProcessInput
+  CS <- addReferencedata(CS, ref_files)
+  CS <- addTestdata(CS, file)
+  CS <- generateFeatures(CS, channels, "quantiles")
+  CS <- generateFeatures(CS, channels, "EMD", aggSlot = "reference")
+  CS <- Flag(CS, featMethod = "quantiles", "novelty")
+  CS <- Flag(CS, featMethod = "EMD", "novelty")
+  if ((CS$novelties$quantiles[[file]]) == FALSE){
+    quantile_FPR <- 0
+  } else {
+    quantile_FPR <- 1
+  }
+  if ((CS$novelties$EMD[[file]]) == FALSE){
+    EMD_FPR <- 0
+  } else {
+    EMD_FPR <- 1
+  }
+  results[[file]] <- list("file" = file, "quantile_FPR" = quantile_FPR,
+                          "EMD_FPR" = EMD_FPR)
+}
+results <- dplyr::bind_rows(results)
+```
+
+## Subsample simulation
+
+We use the custom pre-processing functionality of CytoScan to introduce effects.
+
+```{r}
+subsampleFactors <- seq(0.1, 1, 0.1)
+```
+
+```{r}
+subsampleInput <- function(ff){
+  if (grepl(anomalySample, ff@description$FILENAME)){
+    # Get the metaclusters
+    ff_fSOM <- FlowSOM::NewData(fsom=fSOM, input=ff)
+    MC <- FlowSOM::GetMetaclusters(ff_fSOM)
+    # Perform subsampling
+    otherCells <- ff@exprs[MC != metaclusterID,]
+    MCCells <- ff@exprs[MC == metaclusterID,]
+    nCells <- ceiling((1 - effectSize) * nrow(MCCells))
+    idx <- sample(seq(1, nrow(MCCells)), nCells)
+    MCCells <- MCCells[idx,]
+    ff@exprs <- rbind(otherCells, MCCells)
+  }
+  return(ff)
+}
+```
+
+```{r}
+anomalySamples <- files
+featMethods <- c("EMD", "quantiles")
+```
+
+```{r}
+# This function is used to assess performance
+getPerformance <- function(CS, files, modifiedSample, featMethod, slot){
+  anomalies <- names(CS[[slot]][[featMethod]])[which(CS[[slot]][[featMethod]] == TRUE)]
+  if (modifiedSample %in% anomalies){
+    TN <- 0
+    FP <- 1
+  } else {
+    TN <- 1
+    FP <- 0
+  }
+  output <- data.frame(modifiedSample = modifiedSample,
+                       featMethod = featMethod,
+                       TN = TN,
+                       FP = FP)
+  return(output)
+}
+```
+
+```{r}
+simulateSubsample <- function(anomalySamples, featMethods){
+  # Identify biggest cell population (FlowSOM)
+  set.seed(42)
+  agg <- FlowSOM::AggregateFlowFrames(files, cTotal=10**6, channels = channels, 
+                                      silent=TRUE)
+  fSOM <<- FlowSOM::FlowSOM(agg, colsToUse = channels, maxMeta = 20, seed = 42)
+  counts <- FlowSOM::GetCounts(fSOM, level = "metaclusters")
+  names(counts) <- seq(1, length(counts))
+  metaclusterID <<- as.numeric(names(counts)[which.max(counts)])
+
+  results <- data.frame()
+  # Loop over all of the anomalous samples
+  for (anomalyIndex in seq_along(anomalySamples)){
+    print(anomalyIndex)
+    start <- Sys.time()
+    anomalySample <<- anomalySamples[anomalyIndex]
+
+    CS <- CytoScan()
+    # Add these variables so we can access them in parallel sockets
+    effectSize <<- NULL
+    CS$parallel$parallelVars <- c("CS", "channels", "readInput",
+                                  "anomalySample", "effectSize", "fSOM",
+                                  "metaclusterID")
+    CS$parallel$parallelPackages <- c(CS$parallel$parallelPackages, "FlowSOM")
+    CS$preprocessFunction <- subsampleInput
+    effectSizes <- subsampleFactors
+    
+    CS <- addTestdata(CS, files[files != anomalySample], read = TRUE)
+    # Copy the test data to the reference data slot (faster than regeneration)
+    CS$paths$reference <- CS$paths$test
+    CS$data$reference <- CS$data$test
+
+    # Generate all the features 
+    for (featMethod in featMethods){
+      CS <- generateFeatures(CS, channels = channels, featMethod = featMethod,
+                             cores = 20)
+    }
+    # Add the test sample using an effect size and generate features
+    for (effectSize in effectSizes){
+      effectSize <<- effectSize
+      CS <- addTestdata(CS, files, read = TRUE)
+        for (featMethod in featMethods){
+          CS <- generateFeatures(CS, channels = channels, featMethod = featMethod,
+                                 aggSlot = "test", cores = 1)
+          CS <- Flag(CS, flagStrat = "outlier", featMethod = featMethod)
+          output <- getPerformance(CS, files, anomalySample, featMethod, "outliers")
+          output$simulatedSetting <- "subsample"
+          output$effectSize <- effectSize
+          output$flagStrat <- "outlier"
+          results <- rbind(results, output)
+          
+          CS <- Flag(CS, flagStrat = "novelty", featMethod = featMethod)
+          output <- getPerformance(CS, files, anomalySample, featMethod, "novelties")
+          output$simulatedSetting <- "subsample"
+          output$effectSize <- effectSize
+          output$flagStrat <- "novelty"
+          results <- rbind(results, output)
+          
+          features <- CS$features$test[[featMethod]]
+          CS$features$test[[featMethod]] <- features[rownames(features) != anomalySample,]
+        }
+        CS$data$test[[anomalySample]] <- NULL 
+        CS$paths$test <- files[files != anomalySample]
+    }
+    end <- Sys.time()
+    print(end - start)
+  }
+  return(results)
+}
+```
+
+```{r}
+subsampleResults <- simulateSubsample(files, featMethods)
+write.csv(subsampleResults, "output/subsample_anomaly.csv")
+```
+
+```{r}
+result <- subsampleResults %>%
+  group_by(featMethod, effectSize, simulatedSetting, flagStrat) %>%
+  summarise(
+    FPR = sum(FP) / (sum(FP) + sum(TN)),
+    .groups = "drop" # avoid printing grouping structure message
+)
+```
+
+```{r sessionInfo, echo=FALSE}
+sessionInfo()
+```
